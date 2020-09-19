@@ -8,6 +8,7 @@ import os
 import tempfile
 from shutil import copyfile
 from hashlib import sha256
+import requests
 
 from .models import db_wrapper, Build
 from .celery import make_celery
@@ -28,8 +29,8 @@ def create_build():
 
     # Creamos un ID de build basado en la configuración y en el commit target
     # Para eso necesitamos el ID del ultimo commit de openefi
-    data = subprocess.check_output(['git', 'ls-remote', 'https://github.com/openefi/openefi', 'refs/heads/master'])
-    commitId = data.decode().split("\t")[0]
+    data = requests.get("https://api.github.com/repos/openefi/openefi/commits/master").json()
+    commitId = data['sha']
 
     buildIdPayload = sha256((config + commitId).encode())
     buildId = uuid.uuid5(BUILD_NAMESPACE, buildIdPayload.hexdigest())
