@@ -11,7 +11,6 @@ from hashlib import sha256
 import requests
 from datetime import datetime
 
-from pydantic import BaseModel, Field
 from flask_pydantic_spec import FlaskPydanticSpec, Response
 
 from .models import db_wrapper, Build
@@ -41,76 +40,75 @@ def create_build():
     if not request.is_json:
         return jsonify(msg="Missing JSON in request"), 400
 
-    config = json.dumps(request.json.get('config', []))
+    build_config = json.dumps(request.json.get('config', []))
 
     # Creamos un ID de build basado en la configuración y en el commit target
     # Para eso necesitamos el ID del ultimo commit de openefi
-    data = requests.get(
-        "https://api.github.com/repos/openefi/openefi/commits/master").json()
-    commitId = data['sha']
-    dateTimeObj = datetime.now().time()
-    timeStr = timeObj.strftime("%H:%M:%S.%f")
+    data = requests.get("https://api.github.com/repos/openefi/openefi/commits/master").json()
+    commit_id = data['sha']
+    date_obj = datetime.now().time()
+    time_str = date_obj.strftime("%H:%M:%S.%f")
 
-    buildIdPayload = sha256((config + commitId + timeStr).encode())
-    buildId = uuid.uuid5(BUILD_NAMESPACE, buildIdPayload.hexdigest())
+    build_payload = sha256((build_config + commit_id + time_str).encode())
+    build_id = uuid.uuid5(BUILD_NAMESPACE, build_payload.hexdigest())
 
     try:
-        bld = Build.get(Build.id == buildId)
+        bld = Build.get(Build.id == build_id)
     except Build.DoesNotExist:
-        bld = Build.create(id=buildId, commitId=commitId, config=config)
+        bld = Build.create(id=build_id, commitId=commit_id, config=config)
 
     if bld.status in ('PENDING', 'ERRORED'):
-        build.delay(buildId)
+        build.delay(build_id)
 
     return {
-        'id': buildId,
-        'commitId': commitId,
+        'id': build_id,
+        'commitId': commit_id,
         'status': 'PENDING'
     }
 
 
-@app.route('/build/<buildId>', methods=['GET'])
-def get_build(buildId):
+@app.route('/build/<build_id>', methods=['GET'])
+def get_build(build_id):
     try:
-        build = Build.get(Build.id == buildId)
+        build_obj = Build.get(Build.id == build_id)
     except Build.DoesNotExist:
         return {
             'error': 'Build does not exist'
         }, 404
 
     return {
-        'id': build.id,
-        'commitId': build.commitId,
-        'status': build.status,
+        'id': build_obj.id,
+        'commitId': build_obj.commitId,
+        'status': build_obj.status,
         # 'log': build.log
     }
 
 
-@app.route('/build/<buildId>/bin', methods=['GET'])
-def get_bin(buildId):
+@app.route('/build/<build_id>/bin', methods=['GET'])
+def get_bin(build_id):
     try:
-        build = Build.get(Build.id == buildId)
+        build_obj = Build.get(Build.id == build_id)
     except Build.DoesNotExist:
         return {
             'error': 'Build does not exist'
         }, 404
-    if build.status != 'FINISHED':
+    if build_obj.status != 'FINISHED':
         return {'error': 'Build not finished'}, 400
 
     buildpath = str(pathlib.Path(
         __file__).parent.parent.absolute().joinpath('builds'))
-    if not os.path.isfile(f"{buildpath}/{build.id}.bin"):
+    if not os.path.isfile(f"{buildpath}/{build_obj.id}.bin"):
         return {'error': 'Build output not found'}, 400
 
-    return send_file(f"{buildpath}/{build.id}.bin", "application/octet-stream")
+    return send_file(f"{buildpath}/{build_obj.id}.bin", "application/octet-stream")
 
 
 @celery.task(soft_time_limit=30, time_limit=45)
-def build(buildId):
+def build(build_id):
     buildpath = str(pathlib.Path(
         __file__).parent.parent.absolute().joinpath('builds'))
     try:
-        bld = Build.get(Build.id == buildId)
+        bld = Build.get(Build.id == build_id)
     except Build.DoesNotExist:
         return False
     bld.status = 'IN_PROGRESS'
@@ -118,34 +116,28 @@ def build(buildId):
     # Creamos un directorio temporal
     with tempfile.TemporaryDirectory() as tmpdirname:
         os.chdir(tmpdirname)
-        log = ""
+        log = b""
         # clonamos el repo
         try:
-            log += subprocess.check_output(['git', 'init']).decode()
-            log += subprocess.check_output(['git', 'remote', 'add',
-                                            'origin', 'https://github.com/openefi/openefi']).decode()
-            log += subprocess.check_output(['git', 'fetch',
-                                            'origin', bld.commitId, '--depth=1']).decode()
-            log += subprocess.check_output(['git',
-                                            'reset', '--hard', 'FETCH_HEAD']).decode()
-            log += subprocess.check_output(['git', 'submodule',
-                                            'update', '--init', '--recursive']).decode()
-            log += subprocess.check_output(['echo',
-                                            '>>', 'RELEASE_CI']).decode()
+            log += subprocess.check_output(['git', 'init'])
+            log += subprocess.check_output(['git', 'remote', 'add', 'origin', 'https://github.com/openefi/openefi'])
+            log += subprocess.check_output(['git', 'fetch', 'origin', bld.commitId, '--depth=1'])
+            log += subprocess.check_output(['git', 'reset', '--hard', 'FETCH_HEAD'])
+            log += subprocess.check_output(['git', 'submodule', 'update', '--init', '--recursive'])
+            log += subprocess.check_output(['touch', 'RELEASE_CI'])
             # build
-            log += subprocess.check_output(['tree']).decode()
-            #log += subprocess.check_output(['pio', 'run']).decode()
+            log += subprocess.check_output(['pio', 'run'])
             # Copiamos el output
             # TODO: Auto detectar targets?
-            copyfile("~/.pio/build/black_f407vg/firmware.bin",
+            copyfile(".pio/build/black_f407vg/firmware.bin",
                      f"{buildpath}/{bld.id}.bin")
-            copyfile("~/.pio/build/black_f407vg/firmware.elf",
+            copyfile(".pio/build/black_f407vg/firmware.elf",
                      f"{buildpath}/{bld.id}.elf")
             bld.status = 'FINISHED'
         except Exception as e:
             print(e)
             bld.status = 'ERRORED'
 
-        bld.log = log
+        bld.log = log.decode()
         bld.save()
     return bld.status
